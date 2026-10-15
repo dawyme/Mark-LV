@@ -113,6 +113,26 @@ SEARCH = "search"  # grounded search — REST only, see below
 #     on REST — see SEARCH.
 LIVE = "live"
 
+# THE FREE RUNG — opt-in, last, and never in front of anything.
+#
+# core/llm_client.py can talk to FreeLLMAPI, the self-hosted router that puts
+# every free LLM tier behind one OpenAI-compatible /v1 endpoint and fails over
+# between them when one is rate-limited. Appended at the BOTTOM of each ladder
+# rather than spliced in: Gemini stays the assistant's brain, and this only
+# answers when every Gemini rung on the tier has run out of quota, timed out,
+# or been set aside. Today that case returns None and the feature behind it
+# simply dies; with this rung it gets an answer from a different pool instead.
+#
+# It is off unless you configure it: llm_provider must be "freellmapi" AND a
+# unified key must be present (see docs/FREELLMAPI.md). Setting
+# "llm_gemini_fallback": false in config/api_keys.json disables it even then.
+#
+# What it is NOT: the voice. Conversation audio stays on Gemini Live, and this
+# rung only ever serves the one-shot text calls in this module. A reply from it
+# is wrapped in the same _Reply a Live turn produces, so no caller can tell the
+# difference — and none of them speaks, because none of them ever did.
+FREELLMAPI = "freellmapi"
+
 # Every model this key can reach, in the order to try them. A rung that runs
 # out of quota is skipped for a while and the next one answers — which is the
 # whole point: one model a day means one daily limit, a ladder means the sum of
@@ -132,17 +152,21 @@ _LADDERS = {
            "gemini-2.5-flash-lite", "gemini-3.5-flash-lite",
            "gemini-3.1-flash-lite", "gemini-flash-lite-latest",
            "gemini-2.5-flash", "gemini-3.5-flash",
-           "gemini-3.6-flash", "gemini-3-flash-preview"),
+           "gemini-3.6-flash", "gemini-3-flash-preview", FREELLMAPI),
     SMART: (LIVE,
             "gemini-2.5-flash", "gemini-3.5-flash",
             "gemini-2.5-flash-lite", "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
-            "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-flash-latest"),
+            "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-flash-latest",
+            FREELLMAPI),
     # Grounded search needs response.candidates[...].grounding_metadata, which a
     # Live turn does not produce. REST only, and it says so rather than silently
-    # returning an answer with no sources behind it.
+    # returning an answer with no sources behind it. The free rung can carry a
+    # `google_search` tool of its own, but it comes back as plain text with no
+    # grounding_metadata attached, so a caller asking for SEARCH gets an
+    # answer it cannot cite. It is still better than None, and it is last.
     SEARCH: ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite",
-             "gemini-flash-latest"),
+             "gemini-flash-latest", FREELLMAPI),
 }
 
 # The conversation's own model, and ONE careful fallback behind it.
@@ -464,6 +488,120 @@ def _live_call(contents, config, timeout_ms: int, key: str):
     return _Reply(text) if text else None
 
 
+def freellmapi_enabled() -> bool:
+    """Whether the free rung may be used at all.
+
+    Three conditions, all of them explicit: the provider in
+    core/llm_client.py must be FreeLLMAPI, it must have a key (its router
+    authenticates with a unified key, unlike a local Ollama), and the operator
+    must not have switched the rung off with "llm_gemini_fallback": false.
+
+    Configuring the provider IS the opt-in — nobody gets a second model
+    answering their assistant's side calls by accident, and setting
+    llm_provider back to "ollama" removes the rung again without another flag.
+    """
+    try:
+        raw = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
+        if raw.get("llm_gemini_fallback") is False:
+            return False
+    except Exception:
+        pass
+    try:
+        from core import llm_client
+    except Exception:
+        return False
+    return (llm_client.get_llm_provider() == llm_client.FREELLMAPI
+            and llm_client.is_configured())
+
+
+def _to_openai_messages(contents, system: str) -> list:
+    """REST `contents` -> OpenAI `messages`.
+
+    The three shapes the call sites actually use: a bare string, a list of
+    strings, and the SDK's Part objects. A Part carrying inline image data
+    becomes an `image_url` block with a data: URL, which is the format the
+    FreeLLMAPI router documents for vision — and it then routes the request to
+    a vision-capable model on its own, which is one more thing this file does
+    not have to know about.
+    """
+    import base64
+
+    items = contents if isinstance(contents, (list, tuple)) else [contents]
+    blocks: list = []
+    for item in items:
+        if isinstance(item, str):
+            blocks.append({"type": "text", "text": item})
+            continue
+        blob = getattr(item, "inline_data", None)
+        if blob is not None:
+            data = getattr(blob, "data", None)
+            mime = getattr(blob, "mime_type", None) or "image/png"
+            if isinstance(data, bytes):
+                data = base64.b64encode(data).decode("ascii")
+            if data:
+                blocks.append({"type": "image_url",
+                               "image_url": {"url": f"data:{mime};base64,{data}"}})
+            continue
+        txt = getattr(item, "text", None)
+        if txt:
+            blocks.append({"type": "text", "text": str(txt)})
+            continue
+        if isinstance(item, dict):
+            if item.get("text"):
+                blocks.append({"type": "text", "text": str(item["text"])})
+            elif item.get("image_url"):
+                blocks.append(item)
+
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    text_blocks = [b for b in blocks if b.get("type") == "text"]
+    if len(blocks) == len(text_blocks) and len(text_blocks) == 1:
+        # A single text turn stays a plain string: every provider handles that
+        # shape, and a few of the free ones are fussier about content blocks.
+        messages.append({"role": "user", "content": text_blocks[0]["text"]})
+    else:
+        messages.append({"role": "user", "content": blocks})
+    return messages
+
+
+def _freellmapi_call(contents, config, timeout_ms: int):
+    """One non-streaming chat completion through the configured free router.
+
+    Returns a _Reply (same shape a Live turn returns, so `.text` works at every
+    call site) or None. Never raises: the ladder's contract is that a rung
+    which fails is reported and stepped over.
+    """
+    try:
+        from core import llm_client
+    except Exception as e:
+        print(f"[Gemini] freellmapi: cannot import the LLM client ({e})")
+        return None
+
+    system = ""
+    if config is not None:
+        system = getattr(config, "system_instruction", None) or \
+            (config.get("system_instruction") if isinstance(config, dict) else "") or ""
+    system = str(system)
+    # The persona-suppressing preamble matters just as much here: these are
+    # chat models, and "Reply with one word: ok" comes back as "Understood."
+    # without it.
+    system = _ONE_SHOT_SYSTEM + (f"\n\n{system}" if system else "")
+
+    messages = _to_openai_messages(contents, system)
+    if len(messages) < 2:
+        return None
+
+    try:
+        out = llm_client.call_llm(messages, timeout=max(10, int(timeout_ms / 1000)))
+    except Exception as e:
+        print(f"[Gemini] freellmapi: {type(e).__name__}: {str(e)[:140]}")
+        return None
+
+    text_out = (out.get("content") or "").strip()
+    return _Reply(text_out) if text_out else None
+
+
 def call(contents, tier: str = FAST, config=None,
          timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = ""):
     """Run one generation, walking the ladder until one answers.
@@ -485,6 +623,12 @@ def call(contents, tier: str = FAST, config=None,
 
     resolved_key = key or api_key()
     if not resolved_key:
+        # No Gemini key at all. Every rung on the ladder is a Gemini one except
+        # the last, so this is the one case where the free rung leads — an
+        # assistant configured against a local router should still be able to
+        # read a document, and "no key" is not a reason to answer nothing.
+        if not key and freellmapi_enabled():
+            return _freellmapi_call(contents, config, timeout_ms)
         print("[Gemini] no Gemini API key is configured")
         return None
 
@@ -497,6 +641,17 @@ def call(contents, tier: str = FAST, config=None,
                 if reply is not None:
                     return reply
                 raise RuntimeError("the Live turn came back empty")
+            if model == FREELLMAPI:
+                # Last rung, and only if it was configured. Not configured is
+                # not a failure to report: it is the normal state of an
+                # install that runs on Gemini alone, and saying so on every
+                # exhausted ladder would be noise.
+                if not freellmapi_enabled():
+                    continue
+                reply = _freellmapi_call(contents, config, timeout_ms)
+                if reply is not None:
+                    return reply
+                raise RuntimeError("the free router came back empty")
             if cl is None:
                 cl = client(timeout_ms=timeout_ms, key=resolved_key)
             kwargs = {"model": model, "contents": contents}
