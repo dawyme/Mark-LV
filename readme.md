@@ -54,6 +54,9 @@ It's not just an assistant — it's an extension of your digital life.
 | ♾️ Unlimited Sessions | Sliding-window context compression — one conversation can last for hours |
 | 🖥️ System Control | Launch apps, adjust volume/brightness, WiFi, shortcuts, power — all by voice |
 | 🧩 Autonomous Tasks | High-level planning for complex multi-step goals via agent mode |
+| 🗺️ Task Plans | Break a multi-step goal into steps, run them one at a time, and pick up where you left off after a restart |
+| 🔬 Research Briefs | Splits a topic into sub-questions, searches each one, and answers with one brief — full version on screen and remembered |
+| 🪜 Free LLM Fallback | Point the one-shot calls at a free-tier LLM router and they keep answering when the Gemini text quota runs out |
 | 👁️ Visual Awareness | Screen capture and webcam vision piped into your main Gemini session, labelled by source |
 | 🧠 Persistent Memory | Deeply remembers projects, preferences, and personal context across sessions |
 | ⌨️ Hybrid Input | Seamlessly switch between keyboard typing and voice commands |
@@ -271,6 +274,67 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ---
 
+## 🧠 Second Brain — plans, research, and a free fallback
+
+Three additions that came after the release above. None of them changes how the
+assistant sounds: the voice is still Gemini Live with the prebuilt voice you
+picked in ⚙, and none of these three speaks for itself.
+
+### 🗺️ Task plans
+
+Ask for something that needs more than two or three tool calls and the planning
+agent breaks it into steps, writes them to `memory/tasks.json`, and runs them
+**one at a time** — so "carry on with that" still means something after a
+restart. Every bound is a number written down in the code: at most `MAX_STEPS`
+steps, `MAX_ATTEMPTS` tries per step, and a wall clock on the whole run. A step
+that fails is handed back to the model with its error and asked for corrected
+arguments before it is retried; re-running the identical call is not error
+recovery, it is optimism.
+
+A step runs through the **same** dispatch the rest of the app uses, so it
+inherits the crash isolation and — more importantly — the confirmation gate. A
+step that writes, deletes, moves, installs, changes a setting, launches a
+program or sends a message parks behind the same on-screen button a one-shot
+version of that action would. The allow-list is short and explicit (search,
+read a file, explain code); anything outside it asks. Decomposing a goal into
+steps must not become a way around a safeguard that exists for single actions.
+
+### 🔬 Research briefs
+
+`web_search` answers one question. `research` answers the one that is really
+four: it splits the topic into sub-questions, runs the **existing** search
+action against each, and synthesises one brief. The short version is spoken;
+the full one goes to the content panel and into the ordinary memory store, so
+`recall_memory` finds it next week. Sub-questions, per-query deadlines and the
+total wall clock are all capped — a research tool with no ceiling is just a way
+to make a voice assistant go quiet for two minutes.
+
+### 🪜 A free fallback for the one-shot calls
+
+Every non-conversation model call in the app goes through one ladder in
+`core/gemini.py`. [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) — the
+self-hosted router that puts every free LLM tier behind one OpenAI-compatible
+endpoint — sits at the **bottom** of that ladder. Gemini always gets the first
+refusal; when every rung on it is out of quota, the free pool answers instead of
+the feature dying. `dev_agent`, `code_helper`, `file_processor`,
+`flight_finder` and the rest inherit it without being edited.
+
+It is off until you configure it, and it is never the voice:
+
+```json
+{
+    "llm_provider": "freellmapi",
+    "llm_url": "http://localhost:3001/v1",
+    "llm_model": "auto",
+    "llm_api_key": "freellmapi-…your unified key…"
+}
+```
+
+📄 **[docs/FREELLMAPI.md](docs/FREELLMAPI.md)** — the verified API contract,
+every setting, what was tested, and what was not.
+
+---
+
 ## ⚡ Quick Start
 
 ```bash
@@ -298,6 +362,8 @@ python main.py
 | **GPU** | **Not required.** The avatar is rendered in software, and so is HUD video |
 | **YouTube on the HUD** | `yt-dlp`, installed by `setup.py`. Without it, local files and direct URLs still play and YouTube links open in the browser with an explanation |
 | **Wake word** *(optional)* | One-click download from ⚙ → WAKE WORD (`openwakeword`, a few MB, fully local) |
+| **Free LLM router** *(optional)* | [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), self-hosted. Not required — the assistant runs on Gemini alone. See [docs/FREELLMAPI.md](docs/FREELLMAPI.md) |
+| **Tests** *(optional)* | `pip install -r requirements-dev.txt`, then `python -m pytest` — 204 tests, no API keys or network needed |
 
 ---
 
@@ -329,7 +395,9 @@ Mark LV/
 │   ├── send_message.py       # Messaging integration
 │   ├── weather_report.py     # Live weather data
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
-│   └── desktop.py            # Desktop and taskbar control
+│   ├── desktop.py            # Desktop and taskbar control
+│   ├── task_agent.py         # Multi-step goals — plan, run, resume, cancel
+│   └── research.py           # Bounded multi-query research brief
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
 │   ├── config_manager.py     # api_keys.json access — key, OS, name, voice, colour, toggles
@@ -348,6 +416,8 @@ Mark LV/
 │   ├── audio_devices.py      # Microphone / speaker list — filtered, measured, resolved by name
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
+│   ├── llm_client.py         # Ollama / OpenAI-compatible / FreeLLMAPI — one interface
+│   ├── task_engine.py        # Plans on disk, with bounds and an allow-list
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)
