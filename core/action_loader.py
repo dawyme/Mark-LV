@@ -108,6 +108,27 @@ class ActionRegistry:
             return f"Tool '{name}' failed: {e}"
 
 
+# The registry built by the most recent discovery run.
+#
+# Actions are normally reached through main.py's dispatch, which holds the only
+# reference. Keeping a module-level one lets an action call a SIBLING action
+# through the same validated path — which is what the task engine does when it
+# runs a step. Reusing this path rather than importing a handler directly keeps
+# the crash isolation, the signature introspection and the name-collision
+# checks in one place instead of a second, weaker copy of them elsewhere.
+_ACTIVE: "ActionRegistry | None" = None
+
+
+def get_registry() -> "ActionRegistry | None":
+    """The live registry, or None before discovery has run."""
+    return _ACTIVE
+
+
+def set_registry(registry: "ActionRegistry | None") -> None:
+    global _ACTIVE
+    _ACTIVE = registry
+
+
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
     """Invoke the handler passing only the context kwargs it actually declares
     (or all of them if it has **kwargs), so each action's existing signature
@@ -217,5 +238,6 @@ def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
 
     registry = ActionRegistry(valid, logger)
     registry._all_records = all_records
+    set_registry(registry)
     logger(f"Action discovery complete: {len(valid)} active.")
     return registry
