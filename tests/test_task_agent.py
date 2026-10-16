@@ -316,7 +316,8 @@ def test_confirmed_sensitive_step_is_not_retried_with_changed_arguments(
 
     assert len(reg.calls) == 1
     assert reg.calls[0]["args"] == {"action": "delete", "path": "old.txt"}
-    assert engine.load("plan1").status == engine.ABANDONED
+    # A later retry remains possible, but only after a fresh confirmation.
+    assert engine.load("plan1").status == engine.IN_PROGRESS
 
 
 def test_a_read_only_step_never_reaches_the_gate(plan_of, registry, confirm_ui):
