@@ -18,9 +18,10 @@ HOW IT STAYS OUT OF THE WAY
     stop talking to.
 
 WHAT IT WILL NOT DO UNASKED
-    A step that writes, deletes, moves, installs, changes a setting, launches a
-    program or sends anything to a person is parked behind the same on-screen
-    confirmation the rest of Mark-LV uses (core/confirm.py). The token comes
+    Destructive file changes, system-setting changes, external messages and
+    other high-impact actions are parked behind the same on-screen confirmation
+    the rest of Mark-LV uses (core/confirm.py). Routine local actions such as
+    opening an application run without an unnecessary confirmation. The token comes
     from the interface, not from the model, so decomposing a goal into steps
     cannot become a way around a gate that exists for single actions.
 """
@@ -377,9 +378,9 @@ TOOL = {
         "tool whenever one can do the job. Actions: 'plan' (needs goal) breaks "
         "the goal into steps; 'run' takes the next step; 'finish' runs the "
         "remaining steps in order; 'status' reports progress; 'list' shows "
-        "recent plans; 'cancel' abandons one. A step that writes, deletes, "
-        "changes a setting, launches a program or sends a message will ask the "
-        "user to confirm on screen before it happens — say so, and never claim "
+        "recent plans; 'cancel' abandons one. Destructive file changes, system "
+        "setting changes, external messages and other high-impact actions require "
+        "on-screen confirmation before they happen — say so, and never claim "
         "it is done."
     ),
     "parameters": {

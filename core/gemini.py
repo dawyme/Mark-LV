@@ -117,8 +117,8 @@ LIVE = "live"
 #
 # core/llm_client.py can talk to FreeLLMAPI, the self-hosted router that puts
 # every free LLM tier behind one OpenAI-compatible /v1 endpoint and fails over
-# between them when one is rate-limited. Appended at the BOTTOM of each ladder
-# rather than spliced in: Gemini stays the assistant's brain, and this only
+# between them when one is rate-limited. Appended at the bottom of the FAST
+# and SMART ladders rather than spliced in: Gemini stays the assistant's brain, and this only
 # answers when every Gemini rung on the tier has run out of quota, timed out,
 # or been set aside. Today that case returns None and the feature behind it
 # simply dies; with this rung it gets an answer from a different pool instead.
@@ -159,12 +159,6 @@ _LADDERS = {
             "gemini-3.1-flash-lite",
             "gemini-3.6-flash", "gemini-3-flash-preview", "gemini-flash-latest",
             FREELLMAPI),
-    # Grounded search needs response.candidates[...].grounding_metadata, which a
-    # Live turn does not produce. REST only, and it says so rather than silently
-    # returning an answer with no sources behind it. The free rung can carry a
-    # `google_search` tool of its own, but it comes back as plain text with no
-    # grounding_metadata attached, so a caller asking for SEARCH gets an
-    # answer it cannot cite. It is still better than None, and it is last.
     # Grounded search requires response.candidates[...].grounding_metadata.
     # FreeLLMAPI returns plain text without that metadata, so it must NOT be a
     # SEARCH fallback: an uncited answer must never masquerade as grounded

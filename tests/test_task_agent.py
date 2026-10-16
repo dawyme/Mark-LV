@@ -330,6 +330,19 @@ def test_a_read_only_step_never_reaches_the_gate(plan_of, registry, confirm_ui):
     assert confirm_ui == {}
 
 
+def test_opening_a_local_app_does_not_require_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"open_app"})
+    plan_of([{"title": "Open the requested app", "tool": "open_app",
+              "args": {"app_name": "calculator"}}])
+
+    out = task_agent.task_agent({"action": "run"})
+
+    assert len(reg.calls) == 1
+    assert reg.calls[0]["name"] == "open_app"
+    assert confirm_ui == {}
+    assert "[CONFIRMATION_PENDING]" not in out
+
+
 def test_two_banners_are_never_stacked(plan_of, registry, confirm_ui, monkeypatch):
     registry({"file_controller"})
     plan_of([{"title": "Delete", "tool": "file_controller"}])

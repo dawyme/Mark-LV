@@ -33,9 +33,9 @@ BOUNDS
 SAFETY
     A step may only run a tool on DEFAULT_ALLOWED_TOOLS without asking. That
     list is read-only and local: searching, reading a file, explaining code.
-    Anything that writes, deletes, moves, changes a setting, launches a program
-    or reaches the network to act on the user's behalf needs the same
-    on-screen confirmation the rest of Mark-LV already uses (core/confirm.py) —
+    Consequential actions — such as deleting or overwriting files, changing
+    system settings, sending external messages, or making purchases — need the
+    same on-screen confirmation the rest of Mark-LV already uses (core/confirm.py) —
     a token issued by the interface, never by the model. Decomposing a goal
     into steps must not become a way around a safeguard that exists for single
     actions; if anything it needs it more, because a plan can reach a
@@ -68,6 +68,7 @@ DEFAULT_ALLOWED_TOOLS = frozenset({
     "research",         # the bounded research brief in actions/research.py
     "weather_report",   # reads a forecast
     "flight_finder",    # reads a flight page
+    "open_app",         # launches a requested local application
     "file_processor",   # reads and summarises a local file
     "code_helper",      # explains / reviews code, changes nothing
     "think",            # engine-internal: ask the model, touch nothing
@@ -78,7 +79,7 @@ DEFAULT_ALLOWED_TOOLS = frozenset({
 # a new action would silently fall outside of.
 _EXAMPLES_NEEDING_CONFIRMATION = (
     "file_controller", "computer_settings", "computer_control", "desktop",
-    "send_message", "open_app", "dev_agent", "browser_control",
+    "send_message", "dev_agent", "browser_control",
 )
 
 
