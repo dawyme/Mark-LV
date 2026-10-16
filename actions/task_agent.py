@@ -160,6 +160,11 @@ def _execute_step(plan_id: str, index: int, player=None, speak=None) -> str:
     plan = engine.load(plan_id)
     if plan is None or index < 0 or index >= len(plan.steps):
         return "That plan is not there any more."
+    # A confirmation can remain open while the user changes their mind. Never
+    # let its callback execute a step after the plan has been cancelled or
+    # otherwise reached a terminal state.
+    if plan.is_finished():
+        return f"That plan is already {plan.status}; the step was not run."
     step = plan.steps[index]
 
     _log(player, f"[Plan {plan_id}] {index + 1}/{len(plan.steps)} → {step.title}")
@@ -199,7 +204,10 @@ def _execute_step(plan_id: str, index: int, player=None, speak=None) -> str:
 
         last_error = last_error or text[:300]
 
-        if not engine.can_retry(plan_id, index):
+        # The user confirmed the exact step shown on screen. Do not silently
+        # change its arguments or repeat a potentially external/destructive
+        # action after an ambiguous failure; that would exceed the approval.
+        if step.needs_confirmation() or not engine.can_retry(plan_id, index):
             break
         fixed = _recovered_args(step.tool, step, last_error)
         if fixed:

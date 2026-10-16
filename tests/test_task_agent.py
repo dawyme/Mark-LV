@@ -284,6 +284,41 @@ def test_cancelling_the_confirmation_does_nothing(plan_of, registry, confirm_ui)
     assert engine.load("plan1").steps[0].status != engine.DONE
 
 
+def test_cancelled_plan_cannot_run_from_a_stale_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "Delete", "tool": "file_controller"}])
+
+    task_agent.task_agent({"action": "run"})
+    assert reg.calls == []
+    engine.cancel("plan1")
+    confirm_gate.resolve(accepted=True)
+    import time
+    time.sleep(0.2)
+
+    assert reg.calls == []
+    assert engine.load("plan1").status == engine.CANCELLED
+
+
+def test_confirmed_sensitive_step_is_not_retried_with_changed_arguments(
+        plan_of, registry, confirm_ui, monkeypatch):
+    reg = registry({"file_controller"}, outcomes={
+        "file_controller": ["Tool 'file_controller' failed: uncertain outcome",
+                            "unexpected second execution"]})
+    plan_of([{"title": "Send or modify something", "tool": "file_controller",
+              "args": {"action": "delete", "path": "old.txt"}}])
+    monkeypatch.setattr(task_agent, "_recovered_args",
+                        lambda *a, **kw: {"action": "delete", "path": "other.txt"})
+
+    task_agent.task_agent({"action": "run"})
+    confirm_gate.resolve(accepted=True)
+    import time
+    time.sleep(0.2)
+
+    assert len(reg.calls) == 1
+    assert reg.calls[0]["args"] == {"action": "delete", "path": "old.txt"}
+    assert engine.load("plan1").status == engine.ABANDONED
+
+
 def test_a_read_only_step_never_reaches_the_gate(plan_of, registry, confirm_ui):
     reg = registry({"web_search"})
     plan_of([{"title": "Search", "tool": "web_search"}])

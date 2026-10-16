@@ -100,10 +100,12 @@ def test_rung_can_be_switched_off_explicitly(gemini_env, llm_env):
 
 # ── It is last ───────────────────────────────────────────────────────────────
 
-def test_the_free_rung_sits_at_the_bottom_of_every_ladder():
-    for tier, ladder in gemini._LADDERS.items():
+def test_the_free_rung_is_last_only_on_non_grounded_ladders():
+    for tier in (gemini.FAST, gemini.SMART):
+        ladder = gemini._LADDERS[tier]
         assert ladder[-1] == gemini.FREELLMAPI, tier
         assert ladder.count(gemini.FREELLMAPI) == 1, tier
+    assert gemini.FREELLMAPI not in gemini._LADDERS[gemini.SEARCH]
 
 
 def test_gemini_is_tried_first(gemini_env, llm_env, monkeypatch):
@@ -226,3 +228,30 @@ def test_an_image_becomes_an_image_url_block():
 def test_no_system_message_when_none_is_given():
     msgs = gemini._to_openai_messages("hi", "")
     assert [m["role"] for m in msgs] == ["user"]
+
+
+
+def test_grounded_search_never_falls_back_to_uncited_free_text(
+        gemini_env, llm_env, monkeypatch):
+    _write(gemini_env, llm_env,
+           {"llm_provider": "freellmapi", "llm_api_key": "k"})
+    called = []
+    monkeypatch.setattr(lc, "call_llm",
+                        lambda *a, **kw: called.append(True) or {"content": "uncited"})
+    out = gemini.call("Find sourced information.", tier=gemini.SEARCH)
+    assert out is None
+    assert called == []
+
+
+def test_grounded_search_without_gemini_key_does_not_use_free_text(
+        gemini_env, llm_env, monkeypatch):
+    _write(gemini_env, llm_env,
+           {"gemini_api_key": "", "llm_provider": "freellmapi",
+            "llm_api_key": "k"})
+    gemini._cached_key = None
+    called = []
+    monkeypatch.setattr(lc, "call_llm",
+                        lambda *a, **kw: called.append(True) or {"content": "uncited"})
+    out = gemini.call("Find sourced information.", tier=gemini.SEARCH)
+    assert out is None
+    assert called == []

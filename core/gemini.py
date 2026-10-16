@@ -165,8 +165,12 @@ _LADDERS = {
     # `google_search` tool of its own, but it comes back as plain text with no
     # grounding_metadata attached, so a caller asking for SEARCH gets an
     # answer it cannot cite. It is still better than None, and it is last.
+    # Grounded search requires response.candidates[...].grounding_metadata.
+    # FreeLLMAPI returns plain text without that metadata, so it must NOT be a
+    # SEARCH fallback: an uncited answer must never masquerade as grounded
+    # research. FAST and SMART can still use the free rung when Gemini is out.
     SEARCH: ("gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.5-flash-lite",
-             "gemini-flash-latest", FREELLMAPI),
+             "gemini-flash-latest"),
 }
 
 # The conversation's own model, and ONE careful fallback behind it.
@@ -627,7 +631,7 @@ def call(contents, tier: str = FAST, config=None,
         # the last, so this is the one case where the free rung leads — an
         # assistant configured against a local router should still be able to
         # read a document, and "no key" is not a reason to answer nothing.
-        if not key and freellmapi_enabled():
+        if tier != SEARCH and not key and freellmapi_enabled():
             return _freellmapi_call(contents, config, timeout_ms)
         print("[Gemini] no Gemini API key is configured")
         return None
