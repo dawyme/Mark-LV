@@ -291,13 +291,13 @@ that fails is handed back to the model with its error and asked for corrected
 arguments before it is retried; re-running the identical call is not error
 recovery, it is optimism.
 
-A step runs through the **same** dispatch the rest of the app uses, so it
-inherits the crash isolation and — more importantly — the confirmation gate. A
-step that writes, deletes, moves, installs, changes a setting, launches a
-program or sends a message parks behind the same on-screen button a one-shot
-version of that action would. The allow-list is short and explicit (search,
-read a file, explain code); anything outside it asks. Decomposing a goal into
-steps must not become a way around a safeguard that exists for single actions.
+A step runs through the **same** dispatch the rest of the app uses, inheriting
+the crash isolation and confirmation gate. Confirmation follows the operation:
+routine searches, file reads, creation of a new file, opening an application
+and everyday computer controls run autonomously. Deleting or overwriting files,
+moving or renaming them, shutdown/restart, external messages and other
+high-impact actions wait for the on-screen confirmation button. Unknown
+operations fail safe. Decomposing a goal into steps cannot bypass the gate.
 
 ### 🔬 Research briefs
 
@@ -417,7 +417,7 @@ Mark LV/
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
 │   ├── llm_client.py         # Ollama / OpenAI-compatible / FreeLLMAPI — one interface
-│   ├── task_engine.py        # Plans on disk, with bounds and an allow-list
+│   ├── task_engine.py        # Persistent plans, bounded runs, operation-aware confirmation
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)

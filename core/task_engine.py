@@ -31,15 +31,14 @@ BOUNDS
     STEP_RESULT_CHARS  how much of a step's output is kept
 
 SAFETY
-    A step may only run a tool on DEFAULT_ALLOWED_TOOLS without asking. That
-    list is read-only and local: searching, reading a file, explaining code.
-    Consequential actions — such as deleting or overwriting files, changing
-    system settings, sending external messages, or making purchases — need the
-    same on-screen confirmation the rest of Mark-LV already uses (core/confirm.py) —
-    a token issued by the interface, never by the model. Decomposing a goal
-    into steps must not become a way around a safeguard that exists for single
-    actions; if anything it needs it more, because a plan can reach a
-    destructive tool three steps after the user agreed to something harmless.
+    Routine, low-risk operations should run autonomously. Confirmation is based
+    on the actual operation, not just the tool name: reading or creating a new
+    file and everyday computer controls can proceed, while deleting/overwriting,
+    moving or renaming files, shutdown/restart, external messages and other
+    high-impact actions wait for a UI-issued token. Unknown operations fail
+    safe. Decomposing a goal into steps must not bypass the same gate used for
+    single actions — a plan can reach a destructive tool several steps after
+    the user agreed to something harmless.
 """
 from __future__ import annotations
 
@@ -75,13 +74,8 @@ DEFAULT_ALLOWED_TOOLS = frozenset({
     "think",            # engine-internal: ask the model, touch nothing
 })
 
-# Everything else goes through core/confirm.py. Named here only so the refusal
-# can say why; the decision is "not in the allow-list", never a blocklist that
-# a new action would silently fall outside of.
-_EXAMPLES_NEEDING_CONFIRMATION = (
-    "file_controller", "computer_settings", "computer_control", "desktop",
-    "send_message", "dev_agent", "browser_control",
-)
+# Unknown tools default to confirmation. Known tools whose risk depends on the
+# requested operation are classified in TaskStep.needs_confirmation().
 
 
 # ── Storage ───────────────────────────────────────────────────────────────────
