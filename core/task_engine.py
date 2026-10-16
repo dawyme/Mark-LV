@@ -141,12 +141,18 @@ class TaskStep:
         action = str(args.get("action", "") or "").strip().lower()
 
         if tool == "file_controller":
+            if not action:
+                return True  # unknown operation: fail safe
             if action == "write":
                 # Appending is non-destructive; replacing existing content is not.
                 return not bool(args.get("append", False))
-            return action in {"delete", "move", "rename", "organize_desktop"}
+            if action in {"delete", "move", "rename", "organize_desktop"}:
+                return True
+            return False
 
         if tool == "computer_settings":
+            if not action:
+                return True  # unknown operation: fail safe
             return action in {
                 "restart", "shutdown", "toggle_wifi", "lock_screen",
                 "close_app", "close_window",

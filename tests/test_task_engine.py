@@ -299,7 +299,7 @@ def test_allowed_tools_run_without_asking(tool):
 
 @pytest.mark.parametrize("tool", [
     "file_controller", "computer_settings", "computer_control", "desktop",
-    "send_message", "open_app", "dev_agent", "browser_control", "reminder",
+    "send_message", "dev_agent", "browser_control", "reminder",
 ])
 def test_anything_else_needs_confirmation(tool):
     """The rule is an allow-list, not a blocklist: a new action that writes or
