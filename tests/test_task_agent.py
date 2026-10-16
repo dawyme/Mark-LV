@@ -343,6 +343,53 @@ def test_opening_a_local_app_does_not_require_confirmation(plan_of, registry, co
     assert "[CONFIRMATION_PENDING]" not in out
 
 
+def test_reading_files_does_not_require_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "List documents", "tool": "file_controller",
+              "args": {"action": "list", "path": "documents"}}])
+
+    task_agent.task_agent({"action": "run"})
+
+    assert len(reg.calls) == 1
+    assert reg.calls[0]["args"]["action"] == "list"
+    assert confirm_ui == {}
+
+
+def test_creating_a_new_file_does_not_require_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "Create the requested report", "tool": "file_controller",
+              "args": {"action": "create_file", "path": "documents",
+                       "name": "report.txt", "content": "Summary"}}])
+
+    task_agent.task_agent({"action": "run"})
+
+    assert len(reg.calls) == 1
+    assert confirm_ui == {}
+
+
+def test_routine_computer_controls_do_not_require_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"computer_settings"})
+    plan_of([{"title": "Lower the volume", "tool": "computer_settings",
+              "args": {"action": "volume_down"}}])
+
+    task_agent.task_agent({"action": "run"})
+
+    assert len(reg.calls) == 1
+    assert confirm_ui == {}
+
+
+def test_shutdown_still_requires_confirmation(plan_of, registry, confirm_ui):
+    reg = registry({"computer_settings"})
+    plan_of([{"title": "Shut down the computer", "tool": "computer_settings",
+              "args": {"action": "shutdown"}}])
+
+    out = task_agent.task_agent({"action": "run"})
+
+    assert reg.calls == []
+    assert "[CONFIRMATION_PENDING]" in out
+    assert "computer_settings" in confirm_ui["title"]
+
+
 def test_two_banners_are_never_stacked(plan_of, registry, confirm_ui, monkeypatch):
     registry({"file_controller"})
     plan_of([{"title": "Delete", "tool": "file_controller"}])

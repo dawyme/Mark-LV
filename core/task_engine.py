@@ -61,8 +61,9 @@ MAX_PLANS_KEPT    = 20
 STEP_RESULT_CHARS = 400
 GOAL_MAX_CHARS    = 300
 
-# Steps that may run without asking. Read-only or local, and none of them can
-# reach the world outside this machine.
+# Routine actions that may run without asking. Operations whose consequence
+# varies by action (file management and computer settings) are classified in
+# TaskStep.needs_confirmation() rather than gating every call to that tool.
 DEFAULT_ALLOWED_TOOLS = frozenset({
     "web_search",       # grounded search; returns text
     "research",         # the bounded research brief in actions/research.py
@@ -128,7 +129,30 @@ class TaskStep:
     error:    str = ""
 
     def needs_confirmation(self) -> bool:
-        return self.tool not in DEFAULT_ALLOWED_TOOLS
+        """Gate consequential operations, not whole categories of routine work.
+
+        The same tool can be harmless or risky depending on the requested
+        operation. Reading/listing files and ordinary computer controls should
+        stay autonomous; destructive file operations and high-impact system
+        controls still require the UI-issued confirmation token.
+        """
+        tool = str(self.tool or "").strip().lower()
+        args = self.args if isinstance(self.args, dict) else {}
+        action = str(args.get("action", "") or "").strip().lower()
+
+        if tool == "file_controller":
+            if action == "write":
+                # Appending is non-destructive; replacing existing content is not.
+                return not bool(args.get("append", False))
+            return action in {"delete", "move", "rename", "organize_desktop"}
+
+        if tool == "computer_settings":
+            return action in {
+                "restart", "shutdown", "toggle_wifi", "lock_screen",
+                "close_app", "close_window",
+            }
+
+        return tool not in DEFAULT_ALLOWED_TOOLS
 
 
 @dataclass
