@@ -1,0 +1,15 @@
+# ── MARK LV — development dependencies ───────────────────────────────────────
+# Not needed to run the assistant. `python setup.py` does not install these.
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest                          # 204 tests, offline, no keys
+#   python tests/compat_server_check.py       # wire contract over a real socket
+#   python tests/live_freellmapi_check.py     # real requests to a real router
+#
+# The suite needs nothing from requirements.txt: core/llm_client.py, the task
+# engine and the research action are importable on their own, and the modules
+# that do need PyQt6 / sounddevice / the Gemini SDK are checked by reading
+# their source instead of importing them.
+
+pytest>=8,<10
+requests>=2.31,<3

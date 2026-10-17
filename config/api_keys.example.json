@@ -1,0 +1,59 @@
+{
+    "_readme": "Copy this file to config/api_keys.json and fill in your own values. config/api_keys.json is git-ignored; this example is not, so it must never contain a real key. Only gemini_api_key is required to run Mark-LV — everything else has a working default. See docs/FREELLMAPI.md for the LLM provider settings.",
+
+    "gemini_api_key": "YOUR_GEMINI_API_KEY_HERE",
+
+    "assistant_name": "JARVIS",
+    "user_name": "",
+
+    "voice_name": "Charon",
+
+    "wake_word_enabled": false,
+    "push_to_talk_enabled": false,
+    "hud_style": "face",
+    "thinking_enabled": false,
+    "proactive_audio": true,
+    "media_resolution": "medium",
+    "morning_brief_enabled": true,
+
+    "turn_tuning": {
+        "enabled": false,
+        "silence_ms": 550,
+        "prefix_ms": 150,
+        "end_sensitivity": "high",
+        "start_sensitivity": "default"
+    },
+
+    "input_device": "",
+    "output_device": "",
+
+    "llm_provider": "ollama",
+    "llm_url": "http://localhost:11434",
+    "llm_model": "llama3.2",
+    "llm_api_key": "",
+    "llm_gemini_fallback": true,
+
+    "_llm_examples": {
+        "ollama (default, local, no key)": {
+            "llm_provider": "ollama",
+            "llm_url": "http://localhost:11434",
+            "llm_model": "llama3.2",
+            "llm_api_key": ""
+        },
+        "openai-compatible (LM Studio, LocalAI, Jan, vLLM)": {
+            "llm_provider": "openai",
+            "llm_url": "http://localhost:1234",
+            "llm_model": "qwen2.5-7b-instruct",
+            "llm_api_key": ""
+        },
+        "freellmapi (self-hosted free-tier router)": {
+            "llm_provider": "freellmapi",
+            "llm_url": "http://localhost:3001/v1",
+            "llm_model": "auto",
+            "llm_api_key": "YOUR_FREELLMAPI_UNIFIED_KEY_HERE"
+        }
+    },
+
+    "plugins_enabled": {},
+    "plugin_config": {}
+}
