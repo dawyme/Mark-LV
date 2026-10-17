@@ -54,7 +54,7 @@ It's not just an assistant — it's an extension of your digital life.
 | ♾️ Unlimited Sessions | Sliding-window context compression — one conversation can last for hours |
 | 🖥️ System Control | Launch apps, adjust volume/brightness, WiFi, shortcuts, power — all by voice |
 | 🧩 Autonomous Tasks | High-level planning for complex multi-step goals via agent mode |
-| 🗺️ Task Plans | Break a multi-step goal into steps, run them one at a time, and pick up where you left off after a restart |
+| 🗺️ Task Plans & Background Jobs | Automatically execute permitted routine steps, persist progress, recover interrupted work, and require approval for sensitive actions |
 | 🔬 Research Briefs | Splits a topic into sub-questions, searches each one, and answers with one brief — full version on screen and remembered |
 | 🪜 Free LLM Fallback | Point the one-shot calls at a free-tier LLM router and they keep answering when the Gemini text quota runs out |
 | 👁️ Visual Awareness | Screen capture and webcam vision piped into your main Gemini session, labelled by source |
@@ -280,24 +280,41 @@ Three additions that came after the release above. None of them changes how the
 assistant sounds: the voice is still Gemini Live with the prebuilt voice you
 picked in ⚙, and none of these three speaks for itself.
 
-### 🗺️ Task plans
+### 🗺️ Task plans and background jobs
 
-Ask for something that needs more than two or three tool calls and the planning
-agent breaks it into steps, writes them to `memory/tasks.json`, and runs them
-**one at a time** — so "carry on with that" still means something after a
-restart. Every bound is a number written down in the code: at most `MAX_STEPS`
-steps, `MAX_ATTEMPTS` tries per step, and a wall clock on the whole run. A step
-that fails is handed back to the model with its error and asked for corrected
-arguments before it is retried; re-running the identical call is not error
-recovery, it is optimism.
+Give JARVIS a multi-step goal in natural language and `task_agent` immediately
+queues it. A worker thread builds a bounded plan from actions registered at
+startup, then automatically executes eligible routine steps. The durable worker
+runs away from the UI and voice-processing threads; it does not require a
+separate "run" command for each routine step.
+Plans and step results use the existing `core.task_engine`; job state, logs and
+reports are atomically persisted in `memory/jobs.json`. Completed steps are
+not repeated. Eligible interrupted jobs resume when the app starts again.
 
-A step runs through the **same** dispatch the rest of the app uses, inheriting
-the crash isolation and confirmation gate. Confirmation follows the operation:
-routine searches, file reads, creation of a new file, opening an application
-and everyday computer controls run autonomously. Deleting or overwriting files,
-moving or renaming them, shutdown/restart, external messages and other
-high-impact actions wait for the on-screen confirmation button. Unknown
-operations fail safe. Decomposing a goal into steps cannot bypass the gate.
+The default profile permits routine low-impact work (search, research,
+read-only file processing, code explanation, known local app aliases, and
+reversible volume/brightness controls). Research saves its brief in Mark-LV
+memory, and AI file/code analysis uses the configured model provider. Weather
+and flight lookups launch a browser, so they wait for confirmation. File writes
+are also gated unless explicitly enabled in the local profile; overwrites,
+destructive system changes, unknown app launches, messages, and other
+external-facing operations require confirmation. High-impact background controls
+such as app closing, locking, WiFi changes, shutdown, and restart always require
+explicit approval. Retry, concurrency, runtime,
+queue size, network access and allowed tools are centrally configurable. Jobs
+continue only while Mark-LV and the computer are running; they are not run while
+the computer is powered off.
+
+If a provider, credential, integration or permission is missing, the job records
+a blocker or failure rather than claiming success. Failed steps get a bounded
+retry and, when configured, a limited number of alternative plans; completed
+work is kept, and the replaced suffix remains in the task history.
+
+Use the `jobs` action to submit goals explicitly, list recent history, inspect a
+job/report/log, cancel work, or resume a waiting job. A waiting sensitive step
+can be approved through the existing `task_agent` confirmation flow, then the
+job can be resumed. See **[docs/AUTONOMY.md](docs/AUTONOMY.md)** for
+configuration, recovery behavior and limitations.
 
 ### 🔬 Research briefs
 
@@ -396,7 +413,8 @@ Mark LV/
 │   ├── weather_report.py     # Live weather data
 │   ├── video_player.py       # Plays video on the HUD, where the avatar normally is
 │   ├── desktop.py            # Desktop and taskbar control
-│   ├── task_agent.py         # Multi-step goals — plan, run, resume, cancel
+│   ├── task_agent.py         # Multi-step goals — plans auto-queue routine work
+│   ├── jobs.py               # Background job status, logs, cancellation and resume
 │   └── research.py           # Bounded multi-query research brief
 ├── memory/
 │   ├── memory_manager.py     # Load/save long_term.json — sessions, monitors, identity
@@ -417,10 +435,14 @@ Mark LV/
 │   ├── plugin_loader.py      # Plugin engine — discovery, validation, crash isolation
 │   ├── action_loader.py      # Bundled-action engine — the built-in twin of plugin_loader
 │   ├── llm_client.py         # Ollama / OpenAI-compatible / FreeLLMAPI — one interface
-│   ├── task_engine.py        # Persistent plans, bounded runs, operation-aware confirmation
+│   ├── task_engine.py        # Plans and step state, with bounds and atomic persistence
+│   ├── background_worker.py  # Durable job scheduler, recovery, logs and cancellation
+│   ├── autonomy.py           # Central autonomy profile and policy checks
 │   └── wake_word.py          # Local "Hey Jarvis" detector — own thread, offline, opt-in
 └── config/
     ├── api_keys.json         # API key, name, voice, colour, toggles — created on first launch (git-ignored)
+    ├── autonomy.json         # Optional autonomy profile — copied from autonomy.example.json (git-ignored)
+    ├── autonomy.example.json # Safe default background-job profile
     └── certs/                # Self-signed TLS pair for the phone dashboard — generated locally (git-ignored)
 ```
 

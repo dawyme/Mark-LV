@@ -53,9 +53,29 @@ class FakePlayer:
 
 
 @pytest.fixture(autouse=True)
-def store(tmp_path):
+def store(tmp_path, monkeypatch):
     engine.set_store_path(tmp_path / "tasks.json")
-    yield
+    from core import background_worker
+    from core.autonomy import AutonomyPolicy
+
+    class FakeWorker:
+        def __init__(self):
+            self.policy = AutonomyPolicy()
+            self.started = False
+            self.submissions = []
+
+        def start(self):
+            self.started = True
+            return self
+
+        def submit(self, goal, plan_id="", **kwargs):
+            self.submissions.append((goal, plan_id))
+            return background_worker.Job(id="jobtest", goal=goal, plan_id=plan_id,
+                                         status=background_worker.QUEUED)
+
+    fake = FakeWorker()
+    monkeypatch.setattr(background_worker, "get_worker", lambda: fake)
+    yield fake
     engine.set_store_path(engine._base_dir() / "memory" / "tasks.json")
 
 
@@ -104,17 +124,20 @@ def plan_of(monkeypatch, no_model):
 
 # ── Planning ─────────────────────────────────────────────────────────────────
 
-def test_plan_reports_the_steps_it_made(plan_of, registry):
+def test_plan_queues_goal_without_planning_on_the_voice_path(registry, store, monkeypatch):
     registry({"web_search"})
-    plan_of([{"title": "Find flights", "tool": "web_search",
-              "args": {"query": "flights"}},
-             {"title": "Summarise", "tool": "think"}])
+
+    def planning_must_be_deferred(*_args, **_kwargs):
+        raise AssertionError("the voice/UI path must not call the model planner")
+
+    monkeypatch.setattr(engine, "build_plan", planning_must_be_deferred)
 
     out = task_agent.task_agent({"action": "plan", "goal": "compare flights"})
 
-    assert "Planned in 2 steps" in out
-    assert "Find flights" in out
-    assert "Summarise" in out
+    assert "Started background job jobtest" in out
+    assert "plan and execute this goal" in out
+    assert store.submissions == [("compare flights", "")]
+    assert store.started
 
 
 def test_plan_without_a_goal_asks_for_one():
@@ -122,15 +145,40 @@ def test_plan_without_a_goal_asks_for_one():
     assert "Tell me what you want done" in out
 
 
-def test_a_single_think_step_is_just_answered(plan_of, registry, monkeypatch):
-    """When there is nothing to decompose, do not report a plan — answer."""
+def test_disabled_autonomy_is_not_reported_as_automatic_execution(registry, store):
     registry({"web_search"})
-    plan_of([{"title": "Answer", "tool": "think", "args": {"question": "why?"}}])
-    monkeypatch.setattr(task_agent, "_think", lambda q: "Because physics.")
+    store.policy.profile.allow_autonomous = False
+
+    out = task_agent.task_agent({"action": "plan", "goal": "search the web"})
+
+    assert "Started background job jobtest" in out
+    assert "Automatic execution is disabled" in out
+    assert "Routine steps will run automatically" not in out
+
+
+def test_disabled_background_profile_keeps_single_think_direct_answer_flow(
+        plan_of, registry, store, monkeypatch):
+    registry({"web_search"})
+    store.policy.profile.enable_background_jobs = False
+    plan_of([{"title": "Answer directly", "tool": "think",
+              "args": {"question": "why is the sky blue"}}])
+    monkeypatch.setattr(task_agent, "_think", lambda _question: "Direct answer")
 
     out = task_agent.task_agent({"action": "plan", "goal": "why is the sky blue"})
 
-    assert "Because physics." in out
+    assert out == "Direct answer"
+    assert engine.load("plan1").status == engine.COMPLETED
+    assert store.submissions == []
+
+
+def test_single_think_step_is_queued_like_other_background_work(registry, store):
+    """Even model-only work gets an auditable job and does not block voice/UI."""
+    registry({"web_search"})
+
+    out = task_agent.task_agent({"action": "plan", "goal": "why is the sky blue"})
+
+    assert "Started background job" in out
+    assert store.submissions == [("why is the sky blue", "")]
 
 
 # ── Running a step ───────────────────────────────────────────────────────────
@@ -203,6 +251,27 @@ def test_recovery_asks_the_model_for_corrected_arguments(plan_of, registry,
 
     assert reg.calls[0]["args"] == {"query": ""}
     assert reg.calls[1]["args"] == {"query": "LGW to POS"}
+
+
+def test_argument_repair_cannot_escalate_a_read_into_a_write(plan_of, registry, monkeypatch):
+    reg = registry({"file_processor"}, outcomes={
+        "file_processor": ["Could not read file: missing file"],
+    })
+    plan_of([{"title": "Inspect file", "tool": "file_processor", "args": {
+        "file_path": "missing.txt", "action": "info", "save": False,
+    }}])
+    monkeypatch.setattr(task_agent, "_recovered_args", lambda *a, **kw: {
+        "file_path": "missing.txt", "action": "convert", "save": False,
+    })
+
+    result = task_agent._execute_step("plan1", 0)
+    step = engine.load("plan1").steps[0]
+
+    assert len(reg.calls) == 1
+    assert step.status == engine.FAILED
+    assert step.args["action"] == "convert"
+    assert step.review_required is True
+    assert "confirmation" in result.lower()
 
 
 def test_a_step_gives_up_after_the_bound(plan_of, registry, monkeypatch):
@@ -286,7 +355,8 @@ def test_cancelling_the_confirmation_does_nothing(plan_of, registry, confirm_ui)
 
 def test_cancelled_plan_cannot_run_from_a_stale_confirmation(plan_of, registry, confirm_ui):
     reg = registry({"file_controller"})
-    plan_of([{"title": "Delete", "tool": "file_controller"}])
+    plan_of([{"title": "Delete", "tool": "file_controller",
+              "args": {"action": "delete", "path": "old.txt"}}])
 
     task_agent.task_agent({"action": "run"})
     assert reg.calls == []
@@ -299,12 +369,73 @@ def test_cancelled_plan_cannot_run_from_a_stale_confirmation(plan_of, registry, 
     assert engine.load("plan1").status == engine.CANCELLED
 
 
-def test_confirmed_sensitive_step_is_not_retried_with_changed_arguments(
+def test_confirmation_does_not_apply_after_step_arguments_change(
+        plan_of, registry, confirm_ui):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "Delete", "tool": "file_controller",
+              "args": {"action": "delete", "path": "old.txt"}}])
+
+    task_agent.task_agent({"action": "run"})
+    changed = engine.load("plan1")
+    changed.steps[0].args["path"] = "new.txt"
+    engine._save(changed)
+    confirm_gate.resolve(accepted=True)
+    import time
+    time.sleep(0.2)
+
+    assert reg.calls == []
+    assert engine.load("plan1").steps[0].status == engine.PENDING
+
+
+def test_uncertain_exhausted_step_waits_for_explicit_review(plan_of, registry, confirm_ui):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "Delete a file", "tool": "file_controller",
+              "args": {"action": "delete", "path": "old.txt"}}])
+    plan = engine.load("plan1")
+    plan.max_attempts = 1
+    plan.steps[0].status = engine.FAILED
+    plan.steps[0].attempts = 1
+    plan.steps[0].review_required = True
+    plan.status = engine.IN_PROGRESS
+    engine._save(plan)
+
+    out = task_agent.task_agent({"action": "run"})
+
+    assert "[CONFIRMATION_PENDING]" in out
+    assert "previous outcome is unknown" in confirm_ui["detail"]
+    assert reg.calls == []
+    confirm_gate.resolve(accepted=True)
+    import time
+    time.sleep(0.2)
+
+    assert len(reg.calls) == 1
+    assert engine.load("plan1").steps[0].status == engine.DONE
+    assert engine.load("plan1").steps[0].review_required is False
+
+
+def test_ui_approval_is_passed_to_the_computer_action_handler(
+        plan_of, registry, confirm_ui):
+    reg = registry({"computer_settings"})
+    plan_of([{"title": "Shut down", "tool": "computer_settings",
+              "args": {"action": "shutdown"}}])
+
+    task_agent.task_agent({"action": "run"})
+    assert reg.calls == []
+    confirm_gate.resolve(accepted=True)
+    import time
+    time.sleep(0.2)
+
+    assert len(reg.calls) == 1
+    assert reg.calls[0]["ctx"]["_confirmation_approved"] is True
+    assert engine.load("plan1").steps[0].status == engine.DONE
+
+
+def test_confirmed_sensitive_step_is_not_retried_without_fresh_approval(
         plan_of, registry, confirm_ui, monkeypatch):
     reg = registry({"file_controller"}, outcomes={
         "file_controller": ["Tool 'file_controller' failed: uncertain outcome",
                             "unexpected second execution"]})
-    plan_of([{"title": "Send or modify something", "tool": "file_controller",
+    plan_of([{"title": "Delete a file", "tool": "file_controller",
               "args": {"action": "delete", "path": "old.txt"}}])
     monkeypatch.setattr(task_agent, "_recovered_args",
                         lambda *a, **kw: {"action": "delete", "path": "other.txt"})
@@ -316,7 +447,6 @@ def test_confirmed_sensitive_step_is_not_retried_with_changed_arguments(
 
     assert len(reg.calls) == 1
     assert reg.calls[0]["args"] == {"action": "delete", "path": "old.txt"}
-    # A later retry remains possible, but only after a fresh confirmation.
     assert engine.load("plan1").status == engine.IN_PROGRESS
 
 
@@ -330,20 +460,7 @@ def test_a_read_only_step_never_reaches_the_gate(plan_of, registry, confirm_ui):
     assert confirm_ui == {}
 
 
-def test_opening_a_local_app_does_not_require_confirmation(plan_of, registry, confirm_ui):
-    reg = registry({"open_app"})
-    plan_of([{"title": "Open the requested app", "tool": "open_app",
-              "args": {"app_name": "calculator"}}])
-
-    out = task_agent.task_agent({"action": "run"})
-
-    assert len(reg.calls) == 1
-    assert reg.calls[0]["name"] == "open_app"
-    assert confirm_ui == {}
-    assert "[CONFIRMATION_PENDING]" not in out
-
-
-def test_reading_files_does_not_require_confirmation(plan_of, registry, confirm_ui):
+def test_file_controller_read_retains_the_existing_safe_default(plan_of, registry, confirm_ui):
     reg = registry({"file_controller"})
     plan_of([{"title": "List documents", "tool": "file_controller",
               "args": {"action": "list", "path": "documents"}}])
@@ -355,11 +472,11 @@ def test_reading_files_does_not_require_confirmation(plan_of, registry, confirm_
     assert confirm_ui == {}
 
 
-def test_creating_a_new_file_does_not_require_confirmation(plan_of, registry, confirm_ui):
-    reg = registry({"file_controller"})
-    plan_of([{"title": "Create the requested report", "tool": "file_controller",
-              "args": {"action": "create_file", "path": "documents",
-                       "name": "report.txt", "content": "Summary"}}])
+def test_known_local_app_launch_retains_the_existing_safe_default(
+        plan_of, registry, confirm_ui):
+    reg = registry({"open_app"})
+    plan_of([{"title": "Open calculator", "tool": "open_app",
+              "args": {"app_name": "calculator"}}])
 
     task_agent.task_agent({"action": "run"})
 
@@ -367,7 +484,7 @@ def test_creating_a_new_file_does_not_require_confirmation(plan_of, registry, co
     assert confirm_ui == {}
 
 
-def test_routine_computer_controls_do_not_require_confirmation(plan_of, registry, confirm_ui):
+def test_volume_adjustment_retains_the_existing_safe_default(plan_of, registry, confirm_ui):
     reg = registry({"computer_settings"})
     plan_of([{"title": "Lower the volume", "tool": "computer_settings",
               "args": {"action": "volume_down"}}])
@@ -378,16 +495,35 @@ def test_routine_computer_controls_do_not_require_confirmation(plan_of, registry
     assert confirm_ui == {}
 
 
-def test_shutdown_still_requires_confirmation(plan_of, registry, confirm_ui):
-    reg = registry({"computer_settings"})
-    plan_of([{"title": "Shut down the computer", "tool": "computer_settings",
-              "args": {"action": "shutdown"}}])
+def test_file_creation_is_gated_by_the_central_write_permission(
+        plan_of, registry, confirm_ui, store):
+    reg = registry({"file_controller"})
+    plan_of([{"title": "Create a report", "tool": "file_controller",
+              "args": {"action": "create_file", "path": "documents",
+                       "name": "report.txt", "content": "Summary"}}])
 
     out = task_agent.task_agent({"action": "run"})
 
     assert reg.calls == []
-    assert "[CONFIRMATION_PENDING]" in out
-    assert "computer_settings" in confirm_ui["title"]
+    assert confirm_ui
+    assert "confirmation" in out.lower()
+
+
+def test_file_creation_can_be_enabled_for_a_new_path(
+        tmp_path, monkeypatch, plan_of, registry, confirm_ui, store):
+    from actions import file_controller
+
+    reg = registry({"file_controller"})
+    monkeypatch.setattr(file_controller, "_resolve_path", lambda _raw: tmp_path)
+    store.policy.profile.allow_file_writes = True
+    plan_of([{"title": "Create a report", "tool": "file_controller",
+              "args": {"action": "create_file", "path": str(tmp_path),
+                       "name": "report.txt", "content": "Summary"}}])
+
+    task_agent.task_agent({"action": "run"})
+
+    assert len(reg.calls) == 1
+    assert confirm_ui == {}
 
 
 def test_two_banners_are_never_stacked(plan_of, registry, confirm_ui, monkeypatch):
@@ -467,6 +603,39 @@ def test_list_and_cancel(plan_of, registry):
 def test_an_unknown_action_is_answered_not_raised():
     assert "plan, run, finish, status, list" in task_agent.task_agent(
         {"action": "sideways"})
+
+
+def test_action_result_failure_text_is_not_reported_as_success():
+    assert task_agent._is_failed_result("Search failed: no network")
+    assert task_agent._is_failed_result("Could not read file: permission denied")
+    assert task_agent._is_failed_result("Please provide a search query.")
+    assert task_agent._is_failed_result("Please specify width, height, or scale.")
+    assert task_agent._is_failed_result("Pillow is not installed. Run: pip install Pillow")
+    assert task_agent._is_failed_result("AI image analysis failed: provider unavailable")
+    assert task_agent._is_failed_result("Video transcription failed: ffmpeg error")
+    assert task_agent._is_failed_result("Unknown video action: 'summarize'.")
+    assert task_agent._is_failed_result("I couldn't find any flights; the page may not have loaded")
+    assert task_agent._is_failed_result("I could not match 'invented' to a computer action")
+    assert task_agent._is_failed_result("Access denied: outside the permitted directory")
+    assert task_agent._is_failed_result("Path not found: missing.txt")
+    assert task_agent._is_failed_result("No application name provided.")
+    assert task_agent._is_failed_result("Unsupported operating system: Plan 9")
+    assert task_agent._is_failed_result("Done.")
+    assert not task_agent._is_failed_result("No results found for: a rare query")
+    assert not task_agent._is_failed_result("Found three useful results")
+
+
+def test_file_processor_preserves_empty_results_for_task_verification(tmp_path, monkeypatch):
+    from actions import file_processor
+    path = tmp_path / "report.txt"
+    path.write_text("contents", encoding="utf-8")
+    monkeypatch.setattr(file_processor, "_process_text_doc", lambda *a, **kw: "")
+
+    result = file_processor.file_processor({
+        "file_path": str(path), "action": "info", "save": False,
+    })
+
+    assert result == ""
 
 
 def test_a_crash_inside_the_action_is_spoken_not_raised(monkeypatch):

@@ -7,6 +7,7 @@ a failing step may be retried, and which steps are allowed to run without
 somebody pressing a button.
 """
 import json
+import threading
 
 import pytest
 
@@ -97,6 +98,14 @@ def test_build_plan_uses_the_planner_and_persists():
     assert engine.load(plan.id).goal == "compare three flights"
 
 
+def test_build_plan_can_resume_a_pre_reserved_persistent_id():
+    plan = engine.build_plan("search", TOOLS,
+                             planner=lambda *_: "[]", plan_id="reserved-job-plan")
+
+    assert plan.id == "reserved-job-plan"
+    assert engine.load("reserved-job-plan").goal == "search"
+
+
 def test_the_planner_is_told_which_tools_exist():
     seen = {}
 
@@ -120,7 +129,98 @@ def test_the_planner_is_told_not_to_plan_destructive_steps():
 
     engine.build_plan("clean up my disk", TOOLS, planner=planner)
 
-    assert "Do not plan anything destructive" in seen["prompt"]
+    assert "Never plan deletion, moving/renaming, overwriting" in seen["prompt"]
+
+
+def test_failed_suffix_can_be_replanned_without_losing_attempt_history():
+    plan = engine.build_plan(
+        "find and summarize", TOOLS,
+        planner=lambda _prompt, _system: json.dumps([
+            {"title": "Completed lookup", "tool": "web_search"},
+            {"title": "Failed source", "tool": "web_search"},
+            {"title": "Old summary", "tool": "think"},
+        ]),
+    )
+    engine.start_step(plan.id, 0)
+    engine.record_result(plan.id, 0, True, result="PRIVATE local file contents")
+    for _ in range(engine.MAX_ATTEMPTS):
+        engine.start_step(plan.id, 1)
+        engine.record_result(plan.id, 1, False, error="source timed out")
+
+    captured = {}
+
+    def replan(prompt, _system):
+        captured["prompt"] = prompt
+        return ('[{"title":"Use alternative source",'
+                '"tool":"file_processor","args":{"file_path":"brief.txt"}}]')
+
+    replacement = engine.replan_remaining(plan.id, 1, TOOLS, planner=replan)
+
+    assert "PRIVATE local file contents" not in captured["prompt"]
+    assert replacement is not None
+    assert replacement.status == engine.IN_PROGRESS
+    assert [(s.title, s.status) for s in replacement.steps] == [
+        ("Completed lookup", engine.DONE), ("Use alternative source", engine.PENDING)
+    ]
+    history = replacement.history[-1]["steps"]
+    assert history[0]["attempts"] == engine.MAX_ATTEMPTS
+    assert history[0]["error"] == "source timed out"
+    assert history[1]["title"] == "Old summary"
+
+
+def test_replan_rejects_an_invalid_or_empty_alternative_without_changing_plan():
+    plan = engine.build_plan("goal", TOOLS,
+                             planner=lambda *_: '[{"title":"broken","tool":"web_search"}]')
+    engine.start_step(plan.id, 0)
+    engine.record_result(plan.id, 0, False, error="failed")
+    engine.start_step(plan.id, 0)
+    engine.record_result(plan.id, 0, False, error="still failed")
+    before = engine.load(plan.id)
+
+    replanned = engine.replan_remaining(plan.id, 0, TOOLS,
+                                        planner=lambda *_: "[]")
+
+    assert replanned is None
+    assert engine.load(plan.id).steps[0].title == before.steps[0].title
+    assert not engine.load(plan.id).history
+
+
+def test_corrupt_task_store_is_preserved_before_new_writes():
+    engine.STORE_PATH.write_text('{partial json', encoding="utf-8")
+
+    assert engine.load_all() == []
+    assert not engine.STORE_PATH.exists()
+    assert engine.STORE_PATH.with_suffix(engine.STORE_PATH.suffix + ".corrupt").exists()
+
+
+def test_valid_task_history_survives_an_invalid_partial_row():
+    valid = {
+        "id": "kept", "goal": "keep me", "created": "now", "status": engine.PLANNED,
+        "steps": [{"title": "read", "tool": "web_search", "status": engine.PENDING}],
+    }
+    engine.STORE_PATH.write_text(json.dumps({"plans": [valid, None, {"id": "bad"}]}),
+                                 encoding="utf-8")
+
+    plans = engine.load_all()
+
+    assert [plan.id for plan in plans] == ["kept"]
+    assert engine.load("kept").goal == "keep me"
+
+
+def test_planner_receives_argument_level_file_and_code_safety_rules():
+    prompts = {}
+
+    def planner(prompt, _system):
+        prompts["prompt"] = prompt
+        return "[]"
+
+    engine.build_plan("summarize my report", TOOLS, planner=planner)
+    prompt = prompts["prompt"]
+
+    assert '"save": false' in prompt
+    assert 'action: "explain"' in prompt
+    assert "`weather_report` and" in prompt
+    assert "`flight_finder` open a browser" in prompt
 
 
 def test_a_failed_planner_still_produces_a_usable_plan():
@@ -162,6 +262,93 @@ def test_start_step_marks_it_running_and_counts_the_attempt():
     assert step.status == engine.RUNNING
     assert step.attempts == 1
     assert engine.load(plan.id).status == engine.IN_PROGRESS
+    assert engine.active_step_indices(plan.id) == {0}
+
+    engine.record_result(plan.id, 0, ok=True, result="finished")
+    assert engine.active_step_indices(plan.id) == set()
+
+
+def test_parallel_callers_cannot_claim_the_same_step_twice():
+    plan = _plan(1)
+    barrier = threading.Barrier(3)
+    claimed = []
+
+    def claim():
+        barrier.wait()
+        claimed.append(engine.start_step(plan.id, 0))
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert sum(step is not None for step in claimed) == 1
+    assert engine.load(plan.id).steps[0].attempts == 1
+
+
+def test_reviewed_step_can_be_claimed_after_the_automatic_retry_budget():
+    plan = _plan(1)
+    plan.max_attempts = 1
+    plan.status = engine.IN_PROGRESS
+    plan.steps[0].status = engine.FAILED
+    plan.steps[0].attempts = 1
+    plan.steps[0].review_required = True
+    engine._save(plan)
+
+    restored = engine.load(plan.id)
+
+    assert restored.next_pending() is not None
+    claimed = engine.start_step(plan.id, 0)
+    assert claimed is not None
+    assert claimed.attempts == 2
+
+
+def test_exhausted_step_without_review_cannot_be_claimed_again():
+    plan = _plan(1)
+    plan.max_attempts = 1
+    plan.steps[0].status = engine.FAILED
+    plan.steps[0].attempts = 1
+    plan.status = engine.IN_PROGRESS
+    engine._save(plan)
+
+    assert engine.load(plan.id).next_pending() is None
+    assert engine.start_step(plan.id, 0) is None
+
+
+def test_steps_cannot_be_claimed_out_of_order():
+    plan = _plan(2)
+
+    assert engine.start_step(plan.id, 1) is None
+    assert engine.load(plan.id).steps[1].status == engine.PENDING
+
+
+def test_repaired_arguments_are_atomically_saved_only_after_an_attempt_finishes():
+    plan = _plan(1)
+    engine.start_step(plan.id, 0)
+
+    assert engine.update_step_args(plan.id, 0, {"query": "fixed"}) is None
+    engine.record_result(plan.id, 0, ok=False, error="bad query")
+    updated = engine.update_step_args(plan.id, 0, {"query": "fixed"},
+                                      review_required=True,
+                                      error="review the repaired arguments")
+
+    assert updated.steps[0].args == {"query": "fixed"}
+    assert updated.steps[0].review_required is True
+    assert updated.steps[0].error == "review the repaired arguments"
+    assert engine.load(plan.id).steps[0].args == {"query": "fixed"}
+
+
+def test_interrupted_review_flag_is_persistent_and_requires_approval():
+    plan = _plan(1)
+    plan.steps[0].review_required = True
+    engine._save(plan)
+
+    restored = engine.load(plan.id)
+
+    assert restored.steps[0].review_required
+    assert restored.steps[0].needs_confirmation()
 
 
 def test_a_successful_step_completes_the_plan_when_it_is_the_last():
@@ -225,6 +412,17 @@ def test_cancel():
     assert engine.load(plan.id).is_finished() is True
 
 
+def test_action_result_does_not_revive_a_plan_cancelled_in_flight():
+    plan = _plan(1)
+    engine.start_step(plan.id, 0)
+    assert engine.cancel(plan.id)
+
+    updated = engine.record_result(plan.id, 0, ok=True, result="finished before stop")
+
+    assert updated.status == engine.CANCELLED
+    assert updated.steps[0].status == engine.DONE
+
+
 def test_long_results_are_truncated_on_the_way_in():
     plan = _plan(1)
     engine.start_step(plan.id, 0)
@@ -272,11 +470,27 @@ def test_finished_plans_are_not_offered_as_the_active_one():
     assert engine.active() is None
 
 
-def test_the_store_does_not_grow_without_bound():
+def test_the_store_keeps_a_bounded_finished_plan_history():
     for i in range(engine.MAX_PLANS_KEPT + 10):
-        engine.build_plan(f"goal {i}", TOOLS, planner=lambda p, s: "[]")
+        plan = engine.build_plan(f"goal {i}", TOOLS, planner=lambda p, s: "[]")
+        engine.start_step(plan.id, 0)
+        engine.record_result(plan.id, 0, ok=True, result="complete")
 
     assert len(engine.load_all()) == engine.MAX_PLANS_KEPT
+
+
+def test_finished_plan_retention_never_evicts_unfinished_work():
+    active = _plan(1)
+    for i in range(engine.MAX_PLANS_KEPT + 10):
+        plan = engine.build_plan(f"finished goal {i}", TOOLS,
+                                 planner=lambda p, s: "[]")
+        engine.start_step(plan.id, 0)
+        engine.record_result(plan.id, 0, ok=True, result="complete")
+
+    assert engine.load(active.id) is not None
+    plans = engine.load_all()
+    assert sum(not plan.is_finished() for plan in plans) == 1
+    assert sum(plan.is_finished() for plan in plans) == engine.MAX_PLANS_KEPT - 1
 
 
 def test_a_corrupt_store_is_rebuilt_rather_than_fatal():
@@ -291,15 +505,50 @@ def test_a_corrupt_store_is_rebuilt_rather_than_fatal():
 
 # ── The safety line ──────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("tool", sorted(engine.DEFAULT_ALLOWED_TOOLS))
-def test_allowed_tools_run_without_asking(tool):
+@pytest.mark.parametrize("tool", sorted(engine.DEFAULT_ALLOWED_TOOLS - {
+    "file_controller", "file_processor", "computer_settings", "open_app",
+    "code_helper", "flight_finder"
+}))
+def test_simple_read_only_allowed_tools_run_without_asking(tool):
     step = engine.TaskStep(title="x", tool=tool)
     assert step.needs_confirmation() is False
 
 
+def test_browser_based_flight_search_requires_confirmation():
+    step = engine.TaskStep(title="search flights", tool="flight_finder",
+                           args={"origin": "POS", "destination": "LHR", "date": "2026-11-01"})
+    assert step.needs_confirmation() is True
+
+
+def test_flight_search_fails_closed_if_the_policy_module_cannot_load(monkeypatch):
+    import builtins
+    original_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "core.autonomy":
+            raise ImportError("simulated policy load failure")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    step = engine.TaskStep(title="search flights", tool="flight_finder")
+
+    assert step.needs_confirmation() is True
+
+
+def test_broad_actions_require_safe_args_even_when_tool_is_known():
+    assert engine.TaskStep(title="read", tool="file_processor",
+                           args={"action": "info", "save": False}).needs_confirmation() is False
+    assert engine.TaskStep(title="convert", tool="file_processor",
+                           args={"action": "convert", "save": False}).needs_confirmation() is True
+    assert engine.TaskStep(title="explain", tool="code_helper",
+                           args={"action": "explain"}).needs_confirmation() is False
+    assert engine.TaskStep(title="execute", tool="code_helper",
+                           args={"action": "run"}).needs_confirmation() is True
+
+
 @pytest.mark.parametrize("tool", [
     "file_controller", "computer_settings", "computer_control", "desktop",
-    "send_message", "dev_agent", "browser_control", "reminder",
+    "send_message", "open_app", "dev_agent", "browser_control", "reminder",
 ])
 def test_anything_else_needs_confirmation(tool):
     """The rule is an allow-list, not a blocklist: a new action that writes or

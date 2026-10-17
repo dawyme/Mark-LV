@@ -834,7 +834,9 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     try:
         result = handler(path, action, params, speak)
-        return result or "Done."
+        # Preserve an empty result for task verification. The normal voice
+        # dispatch in main.py still supplies its legacy "Done." fallback.
+        return result or ""
     except Exception as e:
         import traceback
         traceback.print_exc()
