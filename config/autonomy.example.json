@@ -1,0 +1,35 @@
+{
+  "profile": {
+    "name": "autonomous-routine",
+    "allow_autonomous": true,
+    "enable_background_jobs": true,
+    "autonomous_tools": [
+      "think",
+      "web_search",
+      "research",
+      "file_controller",
+      "file_processor",
+      "computer_settings",
+      "open_app",
+      "code_helper"
+    ],
+    "max_job_runtime_seconds": 300,
+    "max_concurrent_jobs": 2,
+    "max_queued_jobs": 100,
+    "max_plan_steps": 6,
+    "max_retries": 1,
+    "max_replans": 1,
+    "retry_backoff_seconds": 1.0,
+    "require_confirmation_for": [
+      "sensitive",
+      "destructive",
+      "external",
+      "security"
+    ],
+    "allow_network_actions": true,
+    "allow_file_writes": false,
+    "allow_destructive": false,
+    "allow_external_facing": false,
+    "respect_os_permissions": true
+  }
+}

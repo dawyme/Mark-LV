@@ -434,8 +434,8 @@ def youtube_video(
 
     try:
         if action == "play":
-            return handler(params, player) or "Done."
-        return handler(params, player, speak) or "Done."
+            return handler(params, player) or ""
+        return handler(params, player, speak) or ""
     except Exception as e:
         print(f"[YouTube] ❌ Error in {action}: {e}")
         return f"YouTube {action} failed, sir: {e}"

@@ -36,7 +36,7 @@ from typing import Callable, Optional
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
-_CTX_KEYS = ("player", "speak", "response", "session_memory")
+_CTX_KEYS = ("player", "speak", "response", "session_memory", "_confirmation_approved")
 
 
 # A tool may declare that the model should NOT be held up waiting for it.
@@ -101,7 +101,10 @@ class ActionRegistry:
         if rec is None or not rec.valid:
             return f"Action '{name}' is not available."
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            # Preserve an empty handler result so task execution can distinguish
+            # "produced no result" from verified success. main.py's conversational
+            # dispatch still supplies its legacy "Done." fallback at the edge.
+            return _call_handler(rec.handler, parameters, ctx or {}) or ""
         except Exception as e:
             self._logger(f"Action '{name}' crashed during run(): {e}")
             traceback.print_exc()
@@ -137,6 +140,8 @@ def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
     has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     kwargs = {}
     for key in _CTX_KEYS:
+        if key == "_confirmation_approved" and key not in ctx:
+            continue
         if has_var_kw or key in sig.parameters:
             kwargs[key] = ctx.get(key)
     return fn(parameters=parameters, **kwargs)

@@ -1235,6 +1235,14 @@ class JarvisLive:
                         except Exception:
                             pass
                     await asyncio.sleep(1.5)
+                    # Persist/park background work before this deliberate hard
+                    # process exit. A running action is allowed a short grace
+                    # period; any remaining RUNNING job is recovered at launch.
+                    try:
+                        from core import background_worker as _background_worker
+                        await asyncio.to_thread(_background_worker.stop_worker, timeout=5.0)
+                    except Exception as _stop_error:
+                        print(f"[Jobs] Shutdown checkpoint warning: {_stop_error}")
                     import os as _os
                     _os._exit(0)
                 asyncio.create_task(_do_shutdown())
@@ -2079,6 +2087,21 @@ class JarvisLive:
         # for host-API enumeration on the Qt thread.
         audio_devices.prefetch()
 
+        # Durable task jobs are independent of the Live session and run on
+        # bounded daemon threads; reconnecting the voice model must not start a
+        # second scheduler. The singleton recovers eligible jobs once here.
+        try:
+            from core import background_worker as _background_worker
+            self._job_worker = _background_worker.start_worker()
+            profile = self._job_worker.policy.profile
+            if profile.enable_background_jobs:
+                print("[Jobs] Background worker started; interrupted eligible jobs recovered.")
+            else:
+                print("[Jobs] Background jobs disabled by config/autonomy.json.")
+        except Exception as e:
+            print(f"[Jobs] Background worker unavailable: {e}")
+            self._job_worker = None
+
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
         try:
             from dashboard.server import DashboardServer
@@ -2307,13 +2330,29 @@ class JarvisLive:
 def main():
     ui = JarvisUI("face.png")
 
-    def runner():
-        ui.wait_for_api_key()
-        jarvis = JarvisLive(ui)
+    # Qt owns the UI lifecycle. Stop the independent worker from its existing
+    # application-exit signal, without changing the window or voice pipeline.
+    def _stop_jobs_on_ui_exit():
         try:
+            from core import background_worker as _background_worker
+            _background_worker.stop_worker(timeout=10.0)
+        except Exception as e:
+            print(f"[Jobs] Shutdown checkpoint warning: {e}")
+
+    try:
+        ui._app.aboutToQuit.connect(_stop_jobs_on_ui_exit)
+    except Exception:
+        pass
+
+    def runner():
+        try:
+            ui.wait_for_api_key()
+            jarvis = JarvisLive(ui)
             asyncio.run(jarvis.run())
         except KeyboardInterrupt:
             print("\n🔴 Shutting down...")
+        finally:
+            _stop_jobs_on_ui_exit()
 
     threading.Thread(target=runner, daemon=True).start()
     ui.root.mainloop()

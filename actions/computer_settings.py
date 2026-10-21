@@ -786,6 +786,7 @@ def computer_settings(
     response=None,
     player=None,
     session_memory=None,
+    _confirmation_approved: bool = False,
 ) -> str:
     if not _PYAUTOGUI:
         return "pyautogui is not installed. Run: pip install pyautogui"
@@ -820,6 +821,14 @@ def computer_settings(
         func = ACTION_MAP.get(action)
         if func is None:
             return f"Unknown action: '{raw_action}'."
+        if _confirmation_approved:
+            # task_agent already obtained a UI-issued approval for these
+            # exact arguments; do not stack a second confirmation banner.
+            try:
+                func()
+                return f"{action} done."
+            except Exception as e:
+                return f"Action failed ({action}): {e}"
         if confirm.pending_title():
             return ("There is already a confirmation waiting on screen. "
                     "Ask the user to answer that one first.")

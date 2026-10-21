@@ -18,8 +18,11 @@ config/whatsapp_web/          # a LINKED WhatsApp session — committing it hand
 
 # ── Personal data the assistant accumulates about you ─────────────────────────
 memory/long_term.json
-# plans the task engine has made — what you asked for, and what it did
+# plans and background-job history (personal task data)
 memory/tasks.json
+memory/jobs.json
+config/autonomy.json
+memory/*.corrupt*
 memory/*.db
 
 # ── Python build noise ────────────────────────────────────────────────────────
